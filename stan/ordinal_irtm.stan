@@ -1,72 +1,68 @@
 
-// Ordinal MIRT model with shared cutpoints and theory-driven constraints
+
+
+
+
 data {
-  int<lower=1> N;                        // Number of respondents
-  int<lower=1> K;                        // Number of items
-  int<lower=2> C;                        // Number of ordinal response categories
-  int<lower=1> D;                        // Number of latent dimensions
-  array[N, K] int<lower=1, upper=C> Y;   // Ordinal response matrix
-  matrix[K, D] lambda_signs;             // Theoretical loading constraints: (-1, 0, 1)
+  int<lower=1> N;                // Number of respondents (persons)
+  int<lower=1> K;                // Number of items
+  int<lower=1> D;                // Number of latent dimensions (traits)
+  int<lower=2> C;                // Number of ordinal response categories (e.g., Likert scale levels)
+  
+  // Response matrix: each entry Y[n,k] is a categorical response in {1, ..., C}
+  int<lower=1, upper=C> Y[N, K]; 
+  
+  // Fixed factor loading design: a matrix with entries in {-1, 0, +1}, 
+  // specifying how each item loads on each dimension (Morucci et al. style)
+  matrix[K, D] lambda_signs;
 }
 
 parameters {
-  matrix[K, D] lambda_raw;              // Unconstrained loadings
-  vector[K] intercepts;                 // Item difficulties
-  matrix[N, D] z;                       // Standard-normal base
-  vector[C - 1] raw_cutpoints;          // Raw cutpoints (unordered)
-  vector<lower=0>[K] discrim;           // Item discriminations
-}
+  // Latent trait estimates (abilities): one D-dimensional vector per respondent
+  matrix[N, D] theta;
 
-transformed parameters {
-  matrix[N, D] theta = z;               //sigma_theta = 1.0
-  matrix[K, D] lambda;
+  // Item discriminations: how strongly each item responds to the latent trait(s)
+  vector[K] alpha;
+
+  // Item intercepts (difficulty or location parameters)
+  vector[K] intercepts;
+
+  // Common threshold vector (cutpoints) used across all items
+  // Must be ordered to ensure identifiability of the ordinal scale
   ordered[C - 1] cutpoints;
-
-
-  // Apply theory-driven constraints to lambda_raw
-  for (k in 1:K) {
-    for (d in 1:D) {
-      lambda[k, d] = lambda_signs[k, d] * lambda_raw[k, d];
-    }
-  }
-
-  // Sort raw_cutpoints to obtain valid cutpoints
-  cutpoints = sort_asc(raw_cutpoints);
 }
 
 model {
-  // --- Priors ---
-  to_vector(lambda_raw) ~ normal(0, 1);
-  intercepts ~ normal(0, 2);
-  discrim ~ lognormal(0, 0.3);
-  to_vector(z) ~ std_normal();
+  // ---------------------------------------------------------------
+  // PRIOR DISTRIBUTIONS
+  // ---------------------------------------------------------------
 
-  raw_cutpoints ~ normal(0, 2);  // Weakly informative location
-  for (c in 1:(C - 2)) {
-    target += normal_lpdf(cutpoints[c + 1] - cutpoints[c] | 1.0, 0.5);  // Penalize overly small/large gaps
-  }
+  // Standard normal prior on abilities: each person has D traits
+  to_vector(theta) ~ normal(0, 1);
 
-  // --- Theory-guided priors on constrained loadings ---
-  for (k in 1:K) {
-    for (d in 1:D) {
-      if (lambda_signs[k, d] == 1)
-        lambda_raw[k, d] ~ normal(0.5, 0.25);
-      else if (lambda_signs[k, d] == -1)
-        lambda_raw[k, d] ~ normal(-0.5, 0.25);
-      else
-        lambda_raw[k, d] ~ normal(0, 0.05);  // Shrink inactive dimensions
-    }
-  }
+  // Shrink discriminations to 1: normal prior centered on typical IRT scale
+  alpha ~ normal(1, 0.5);
 
-  // --- Likelihood ---
-    for (n in 1:N) {
-    for (k in 1:K) {
-      real eta;
-      eta = discrim[k] * (dot_product(lambda[k], theta[n]) + intercepts[k]);
-      eta = fmin(fmax(eta, -20), 20);  // Constraint for numerical stability
+  // Weakly informative prior for item intercepts (difficulty/location)
+  intercepts ~ normal(0, 1);
+
+  // Prior on threshold parameters: shared across all items (global scale)
+  cutpoints ~ normal(0, 1);
+
+  // ---------------------------------------------------------------
+  // LIKELIHOOD
+  // ---------------------------------------------------------------
+
+  for (n in 1:N) {         // Loop over persons
+    for (k in 1:K) {       // Loop over items
+
+      // Compute linear predictor (eta) for respondent n on item k
+      // Using fixed loadings (lambda_signs), alpha[k] as discrimination,
+      // and intercepts[k] as item difficulty/location
+      real eta = intercepts[k] + alpha[k] * dot_product(lambda_signs[k], theta[n]);
+
+      // Observed response follows ordered logistic likelihood
       Y[n, k] ~ ordered_logistic(eta, cutpoints);
     }
   }
-} 
-
-
+}
