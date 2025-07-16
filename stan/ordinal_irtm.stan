@@ -1,34 +1,27 @@
 
-
-
-
-
 data {
-  int<lower=1> N;                // Number of respondents (persons)
+  int<lower=1> N;                // Number of respondents
   int<lower=1> K;                // Number of items
-  int<lower=1> D;                // Number of latent dimensions (traits)
-  int<lower=2> C;                // Number of ordinal response categories (e.g., Likert scale levels)
-  
-  // Response matrix: each entry Y[n,k] is a categorical response in {1, ..., C}
-  int<lower=1, upper=C> Y[N, K]; 
-  
-  // Fixed factor loading design: a matrix with entries in {-1, 0, +1}, 
-  // specifying how each item loads on each dimension (Morucci et al. style)
-  matrix[K, D] lambda_signs;
+  int<lower=1> D;                // Number of latent dimensions
+  int<lower=2> C;                // Number of ordinal response categories
+
+  array[N, K] int<lower=1, upper=C> Y;         // Response matrix (ordinal, 1 to C)
+  matrix[K, D] lambda_signs;                  // Constraint matrix: fixed design of loadings (-1, 0, +1)
 }
 
 parameters {
-  // Latent trait estimates (abilities): one D-dimensional vector per respondent
-  matrix[N, D] theta;
+  // [A] Hierarchical structure for latent traits
+  vector[D] mu_theta;                         // Trait means for each dimension
+  vector<lower=0>[D] sigma_theta;             // Trait standard deviations
+  matrix[N, D] theta;                         // Latent trait scores for each person
 
-  // Item discriminations: how strongly each item responds to the latent trait(s)
-  vector[K] alpha;
+  // [B] Discrimination parameters (positive, skewed)
+  vector<lower=0>[K] alpha;                   // Item discrimination (strength of item sensitivity)
 
-  // Item intercepts (difficulty or location parameters)
-  vector[K] intercepts;
+  // Item location parameters
+  vector[K] intercepts;                       // Item intercepts (difficulty)
 
-  // Common threshold vector (cutpoints) used across all items
-  // Must be ordered to ensure identifiability of the ordinal scale
+  // [C] Ordered thresholds (cutpoints) shared across all items
   ordered[C - 1] cutpoints;
 }
 
@@ -37,31 +30,31 @@ model {
   // PRIOR DISTRIBUTIONS
   // ---------------------------------------------------------------
 
-  // Standard normal prior on abilities: each person has D traits
-  to_vector(theta) ~ normal(0, 1);
+  // [A] Hierarchical priors for latent traits
+  mu_theta ~ normal(0, 1);                    // Prior on trait means (per dimension)
+  sigma_theta ~ normal(1, 0.5);               // Prior on trait variability
+  for (d in 1:D)
+    theta[, d] ~ normal(mu_theta[d], sigma_theta[d]);  // Individual-level abilities
 
-  // Shrink discriminations to 1: normal prior centered on typical IRT scale
-  alpha ~ normal(1, 0.5);
+  // [B] Lognormal prior for discrimination parameters (positive, moderately skewed)
+  alpha ~ lognormal(0, 0.5);
 
-  // Weakly informative prior for item intercepts (difficulty/location)
+  // Weakly informative prior for item intercepts
   intercepts ~ normal(0, 1);
 
-  // Prior on threshold parameters: shared across all items (global scale)
-  cutpoints ~ normal(0, 1);
+  // [C] Prior for cutpoints (ordered thresholds) — regular and wide
+  cutpoints ~ normal([-2, -1, 0, 1, 2, 3], 0.5);  // Helps stabilize estimation
 
   // ---------------------------------------------------------------
   // LIKELIHOOD
   // ---------------------------------------------------------------
 
-  for (n in 1:N) {         // Loop over persons
-    for (k in 1:K) {       // Loop over items
-
-      // Compute linear predictor (eta) for respondent n on item k
-      // Using fixed loadings (lambda_signs), alpha[k] as discrimination,
-      // and intercepts[k] as item difficulty/location
+  for (n in 1:N) {
+    for (k in 1:K) {
+      // Linear predictor for person n and item k
       real eta = intercepts[k] + alpha[k] * dot_product(lambda_signs[k], theta[n]);
 
-      // Observed response follows ordered logistic likelihood
+      // Ordinal logistic response model
       Y[n, k] ~ ordered_logistic(eta, cutpoints);
     }
   }
