@@ -1,58 +1,47 @@
 
 # batch_simulate_and_fit_vi.R
-# --------------------------------------------------------------
-# BATCHED Simulation + Recovery Evaluation for Ordinal MIRT VI
-# --------------------------------------------------------------
-# This script performs a systematic batch simulation study of an ordinal MIRT
-# (Multidimensional Item Response Theory) model estimated via Variational Inference (VI).
+# ------------------------------------------------------------------------------
+# Targeted Simulation + Recovery Evaluation for Ordinal MIRT (Variational Inference)
+# ------------------------------------------------------------------------------
+# This script conducts a focused simulation study for a multidimensional IRT model
+# estimated via mean-field Variational Inference (VI). It simulates data with known
+# parameters and evaluates how well the model recovers latent traits (theta).
 #
-# For each combination of the following parameters:
-#   - N: Number of respondents (sample size)
-#   - K: Number of items
-#   - alpha_sd: Standard deviation of item discriminations (α)
-#   - cutpoint_sets: Thresholds for ordinal categories (narrow vs. wide)
-#   - D: Number of latent dimensions (traits)
+# Key grid dimensions:
+#   - N: sample size (targeting realistic scales up to 20,000)
+#   - K: number of items (fixed to 18 as in real-world setting)
+#   - alpha_sd: variability in item discrimination
+#   - cutpoints: threshold structures (narrow, wide, empirical)
+#   - D: latent dimensions (primarily 3, optionally 4)
 #
-# it:
-#   1. Simulates a dataset with known parameters
-#   2. Fits the model using VI
-#   3. Computes the recovery correlation between true and estimated theta values
-#   4. Saves the results (posterior, plots, summary) for each run
-#   5. Logs all results into a master summary CSV
-#
-# The output is stored in: /results/batch_<timestamp>/
-# The key file for analysis is: batch_summary.csv
+# Output: correlation between estimated and true theta; results are logged to CSV and PNG.
 
 library(tidyverse)
 library(cmdstanr)
 library(posterior)
 library(here)
 
-# --------------------------------------------------------------
-# Step 1: Define Batch Grid of Parameter Settings
-# --------------------------------------------------------------
-N_vals <- c(500, 1000, 5000, 10000)
-K_vals <- c(18)
-alpha_sds <- c(0.1, 0.3, 0.5)
+# ----------------------------------
+# Simulation grid
+# ----------------------------------
+N_vals <- c(1000, 5000, 10000, 20000)  # realistic respondent sizes
+K_vals <- c(18)                        # fixed item count
+alpha_sds <- c(0.25, 0.5, 0.75)        # spread of item discrimination
 cutpoint_sets <- list(
-  narrow = c(-1.5, -1, -0.5, 0, 0.5, 1),
-  wide = c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5)
+  narrow    = c(-1.5, -1, -0.5, 0, 0.5, 1),
+  wide      = c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5),
+  empirical = c(-2, -1.5, -0.5, 0.5, 1.5, 2.5)
 )
-D_vals <- c(3, 4)
+D_vals <- c(3, 4)  # primarily D = 3, optionally 4 for robustness
 
-# Timestamp for tracking
+# Create output directory
 batch_id <- format(Sys.time(), "%Y%m%d_%H%M")
-
-# Output folder
 out_dir <- here("results", paste0("batch_", batch_id))
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
-# Logging data frame
-log_results <- tibble()
+data_log <- tibble()
 
-# --------------------------------------------------------------
-# Step 2: Begin Batch Loop
-# --------------------------------------------------------------
+# Loop through grid
 for (N in N_vals) {
   for (K in K_vals) {
     for (alpha_sd in alpha_sds) {
@@ -62,16 +51,21 @@ for (N in N_vals) {
           C <- 7
           cutpoints_true <- cutpoint_sets[[cp_name]]
           
-          # Simulate true parameters
+          # Simulate hierarchical theta
+          mu_theta <- rnorm(D, 0, 1)
+          sigma_theta <- runif(D, 0.7, 1.3)
           theta_true <- matrix(rnorm(N * D), nrow = N, ncol = D)
+          for (d in 1:D) {
+            theta_true[, d] <- rnorm(N, mu_theta[d], sigma_theta[d])
+          }
+          
           alpha_true <- rlnorm(K, log(1), alpha_sd)
-          intercepts_true <- rnorm(K, 0, 1)
+          intercepts_true <- rnorm(K, 0, 1.5)
           
           lambda_signs <- matrix(0, nrow = K, ncol = D)
           for (d in 1:D) {
-            row_start <- floor((d - 1) * K / D) + 1
-            row_end <- floor(d * K / D)
-            lambda_signs[row_start:row_end, d] <- 1
+            idx <- ((d - 1) * K / D + 1):(d * K / D)
+            lambda_signs[idx, d] <- 1
           }
           
           ordered_logistic_probs <- function(eta, cutpoints) {
@@ -91,7 +85,7 @@ for (N in N_vals) {
           
           stan_data <- list(N = N, K = K, D = D, C = C, Y = Y, lambda_signs = lambda_signs)
           
-          model <- cmdstan_model(here("stan", "ordinal_irtm.stan"))
+          model <- cmdstan_model(here("stan", "ordinal_irtm_recovery.stan"))
           
           fit_vi <- model$variational(
             data = stan_data,
@@ -106,31 +100,21 @@ for (N in N_vals) {
           theta_draws <- draws %>% select(starts_with("theta"))
           theta_est <- theta_draws %>% summarise(across(everything(), mean))
           
-          theta_est_vector <- as.numeric(theta_est)
-          theta_true_vector <- as.numeric(theta_true)
-          correlation <- cor(theta_true_vector, theta_est_vector)
-          
+          correlation <- cor(as.numeric(theta_true), as.numeric(theta_est))
           sim_id <- paste0("N", N, "_K", K, "_sd", alpha_sd, "_", cp_name, "_D", D)
           
-          # Save results
           write_csv(theta_est, file.path(out_dir, paste0("theta_est_", sim_id, ".csv")))
           write_csv(data.frame(correlation = correlation), file.path(out_dir, paste0("summary_", sim_id, ".csv")))
           
-          plot <- qplot(theta_true_vector, theta_est_vector) +
+          plot <- qplot(as.numeric(theta_true), as.numeric(theta_est)) +
             labs(title = paste0("Recovery: ", sim_id),
                  x = "True Theta", y = "Estimated Theta (mean VI)") +
             theme_minimal()
           
           ggsave(file.path(out_dir, paste0("plot_", sim_id, ".png")), plot, bg = "white")
           
-          # Append to log
-          log_results <- bind_rows(log_results, tibble(
-            N = N,
-            K = K,
-            D = D,
-            alpha_sd = alpha_sd,
-            cutpoints = cp_name,
-            correlation = correlation
+          data_log <- bind_rows(data_log, tibble(
+            N = N, K = K, D = D, alpha_sd = alpha_sd, cutpoints = cp_name, correlation = correlation
           ))
         }
       }
@@ -138,6 +122,72 @@ for (N in N_vals) {
   }
 }
 
-# Save batch log
-write_csv(log_results, file.path(out_dir, "batch_summary.csv"))
+write_csv(data_log, file.path(out_dir, "batch_summary.csv"))
 message("\n✅ All simulations completed. Summary saved to:", out_dir)
+
+
+################################################################################
+
+
+# analyze_batch_vi.R
+# ---------------------------------------------------------------------
+# Summary analysis script for evaluating performance of ordinal MIRT-VI
+# simulation batches. Reads from a single batch_summary.csv file and
+# produces aggregated insights and visualizations.
+# ---------------------------------------------------------------------
+
+# --------------------------------------------------------------
+# Step 1: Load the latest batch summary
+# --------------------------------------------------------------
+# Adjust this path if you want to analyze an older batch manually
+batch_folders <- list.dirs(here("results"), full.names = TRUE, recursive = FALSE)
+latest_batch <- batch_folders[which.max(file.info(batch_folders)$mtime)]
+summary_path <- file.path(latest_batch, "batch_summary.csv")
+
+summary_data <- read_csv(summary_path)
+
+# --------------------------------------------------------------
+# Step 2: Inspect and clean
+# --------------------------------------------------------------
+
+# Ensure correct column types
+summary_data <- summary_data %>%
+  mutate(
+    N = as.factor(N),
+    D = as.factor(D),
+    alpha_sd = as.factor(alpha_sd),
+    cutpoints = factor(cutpoints, levels = c("narrow", "wide"))
+  )
+
+# --------------------------------------------------------------
+# Step 3: Summary statistics
+# --------------------------------------------------------------
+overall_stats <- summary_data %>%
+  group_by(N, D, alpha_sd, cutpoints) %>%
+  summarise(
+    mean_r = mean(correlation),
+    sd_r = sd(correlation),
+    .groups = "drop"
+  )
+
+print("Mean correlations per condition:")
+print(overall_stats, n = 48)
+
+# --------------------------------------------------------------
+# Step 4: Visualization: heatmaps or faceted plots
+# --------------------------------------------------------------
+ggplot(overall_stats, aes(x = alpha_sd, y = N, fill = mean_r)) +
+  geom_tile(color = "white") +
+  facet_grid(D ~ cutpoints) +
+  scale_fill_viridis_c(option = "D", name = "Mean r") +
+  labs(
+    title = "Recovery Performance by VI (Mean Correlation)",
+    x = "Discrimination SD (alpha_sd)",
+    y = "Sample Size (N)"
+  ) +
+  theme_minimal()
+
+# Optional: Save summary plot
+ggsave(file.path(latest_batch, "summary_heatmap.png"), width = 10, height = 6, dpi = 300)
+
+message("\n✅ Summary analysis complete. Output saved to:", latest_batch)
