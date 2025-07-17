@@ -7,8 +7,7 @@
 # estimated via mean-field Variational Inference (VI). It simulates data with known
 # parameters and evaluates how well the model recovers latent traits (theta).
 #
-# Updated to reflect the hierarchical prior structure and lognormal prior on alpha
-# as implemented in the Stan model.
+# This version reverts to the original Stan model (no hierarchical priors, normal alpha).
 
 library(tidyverse)
 library(cmdstanr)
@@ -44,13 +43,8 @@ for (N in N_vals) {
           C <- 7
           cutpoints_true <- cutpoint_sets[[cp_name]]
           
-          # Simulate hierarchical theta
-          mu_theta <- rnorm(D, 0, 1)
-          sigma_theta <- runif(D, 0.7, 1.3)
-          theta_true <- matrix(NA, nrow = N, ncol = D)
-          for (d in 1:D) {
-            theta_true[, d] <- rnorm(N, mean = mu_theta[d], sd = sigma_theta[d])
-          }
+          # Simulate theta
+          theta_true <- matrix(rnorm(N * D), nrow = N, ncol = D)
           
           alpha_true <- rlnorm(K, log(1), alpha_sd)
           intercepts_true <- rnorm(K, 0, 1.5)
@@ -78,7 +72,7 @@ for (N in N_vals) {
           
           stan_data <- list(N = N, K = K, D = D, C = C, Y = Y, lambda_signs = lambda_signs)
           
-          model <- cmdstan_model(here("stan", "ordinal_irtm.stan"))
+          model <- cmdstan_model(here("stan", "ordinal_irtm_classic.stan"))
           
           fit_vi <- model$variational(
             data = stan_data,
@@ -98,7 +92,6 @@ for (N in N_vals) {
           
           write_csv(theta_est, file.path(out_dir, paste0("theta_est_", sim_id, ".csv")))
           write_csv(data.frame(correlation = correlation), file.path(out_dir, paste0("summary_", sim_id, ".csv")))
-          write_csv(data.frame(mu_theta = mu_theta, sigma_theta = sigma_theta), file.path(out_dir, paste0("priors_", sim_id, ".csv")))
           
           plot <- qplot(as.numeric(theta_true), as.numeric(theta_est)) +
             labs(title = paste0("Recovery: ", sim_id),
