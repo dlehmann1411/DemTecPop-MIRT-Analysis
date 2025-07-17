@@ -1,60 +1,68 @@
 
+// ------------------------------------------------------------
+// ORDINAL MIRT MODEL — HIERARCHICAL PRIORS + LOGNORMAL α PRIOR
+// Updated to include:
+// [A] Hierarchical priors for latent traits (mu_theta, sigma_theta)
+// [B] Lognormal prior for item discrimination parameters (alpha)
+// [C] Informative prior on cutpoints
+// ------------------------------------------------------------
+
 data {
   int<lower=1> N;                // Number of respondents
   int<lower=1> K;                // Number of items
   int<lower=1> D;                // Number of latent dimensions
-  int<lower=2> C;                // Number of ordinal response categories
+  int<lower=2> C;                // Number of ordinal response categories (e.g., Likert levels)
 
-  array[N, K] int<lower=1, upper=C> Y;         // Response matrix (ordinal, 1 to C)
-  matrix[K, D] lambda_signs;                  // Constraint matrix: fixed design of loadings (-1, 0, +1)
+  array[N, K] int<lower=1, upper=C> Y;   // Response matrix: ordinal ratings (1 to C)
+  matrix[K, D] lambda_signs;             // Fixed design matrix of item loadings (-1, 0, +1)
 }
 
 parameters {
-  // [A] Hierarchical structure for latent traits
-  vector[D] mu_theta;                         // Trait means for each dimension
-  vector<lower=0>[D] sigma_theta;             // Trait standard deviations
-  matrix[N, D] theta;                         // Latent trait scores for each person
+  // [A] Hierarchical latent trait structure
+  vector[D] mu_theta;                    // Trait means per dimension
+  vector<lower=0>[D] sigma_theta;        // Trait standard deviations
+  matrix[N, D] theta;                    // Latent traits per person
 
-  // [B] Discrimination parameters (positive, skewed)
-  vector<lower=0>[K] alpha;                   // Item discrimination (strength of item sensitivity)
+  // [B] Discrimination parameters (positive-only)
+  vector<lower=0>[K] alpha;              // Item discrimination (strength of slope)
 
-  // Item location parameters
-  vector[K] intercepts;                       // Item intercepts (difficulty)
+  // Item difficulty parameters
+  vector[K] intercepts;                  // Item intercepts (location on latent scale)
 
-  // [C] Ordered thresholds (cutpoints) shared across all items
-  ordered[C - 1] cutpoints;
+  // [C] Global cutpoints across items (ordered)
+  ordered[C - 1] cutpoints;              // Shared ordinal thresholds
 }
 
 model {
-  // ---------------------------------------------------------------
-  // PRIOR DISTRIBUTIONS
-  // ---------------------------------------------------------------
+  // ------------------------------------------------------------
+  // PRIORS
+  // ------------------------------------------------------------
 
   // [A] Hierarchical priors for latent traits
-  mu_theta ~ normal(0, 1);                    // Prior on trait means (per dimension)
-  sigma_theta ~ normal(1, 0.5);               // Prior on trait variability
+  mu_theta ~ normal(0, 1);                            // Mean trait level per dimension
+  sigma_theta ~ normal(1, 0.5);                       // Trait spread per dimension
   for (d in 1:D)
-    theta[, d] ~ normal(mu_theta[d], sigma_theta[d]);  // Individual-level abilities
+    theta[, d] ~ normal(mu_theta[d], sigma_theta[d]); // Individual-level latent traits
 
-  // [B] Lognormal prior for discrimination parameters (positive, moderately skewed)
-  alpha ~ lognormal(0, 0.5);
+  // [B] Lognormal prior for discrimination (positive, skewed)
+  alpha ~ lognormal(0, 0.5);                          // Regularization and positive constraint
 
-  // Weakly informative prior for item intercepts
+  // Priors for item intercepts (weakly informative)
   intercepts ~ normal(0, 1);
 
-  // [C] Prior for cutpoints (ordered thresholds) — regular and wide
-  cutpoints ~ normal([-2, -1, 0, 1, 2, 3], 0.5);  // Helps stabilize estimation
+  // [C] Prior for cutpoints: informative to stabilize estimation
+  cutpoints ~ normal([-2, -1, 0, 1, 2, 3], 0.5);
 
-  // ---------------------------------------------------------------
+  // ------------------------------------------------------------
   // LIKELIHOOD
-  // ---------------------------------------------------------------
+  // ------------------------------------------------------------
 
   for (n in 1:N) {
     for (k in 1:K) {
       // Linear predictor for person n and item k
       real eta = intercepts[k] + alpha[k] * dot_product(lambda_signs[k], theta[n]);
 
-      // Ordinal logistic response model
+      // Ordinal response modeled via ordered logistic regression
       Y[n, k] ~ ordered_logistic(eta, cutpoints);
     }
   }
