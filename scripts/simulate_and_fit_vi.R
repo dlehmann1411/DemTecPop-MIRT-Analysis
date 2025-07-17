@@ -7,14 +7,8 @@
 # estimated via mean-field Variational Inference (VI). It simulates data with known
 # parameters and evaluates how well the model recovers latent traits (theta).
 #
-# Key grid dimensions:
-#   - N: sample size (targeting realistic scales up to 20,000)
-#   - K: number of items (fixed to 18 as in real-world setting)
-#   - alpha_sd: variability in item discrimination
-#   - cutpoints: threshold structures (narrow, wide, empirical)
-#   - D: latent dimensions (primarily 3, optionally 4)
-#
-# Output: correlation between estimated and true theta; results are logged to CSV and PNG.
+# Updated to reflect the hierarchical prior structure and lognormal prior on alpha
+# as implemented in the Stan model.
 
 library(tidyverse)
 library(cmdstanr)
@@ -24,12 +18,11 @@ library(here)
 # ----------------------------------
 # Simulation grid
 # ----------------------------------
-N_vals <- c(1000, 5000, 10000, 20000)  # realistic respondent sizes
-K_vals <- c(18)                        # fixed item count
-alpha_sds <- c(0.25, 0.5, 0.75)        # spread of item discrimination
+N_vals <- c(10000, 20000)  # realistic respondent sizes
+K_vals <- c(18)            # fixed item count
+alpha_sds <- c(0.5, 0.75)  # spread of item discrimination
 cutpoint_sets <- list(
-  narrow    = c(-1.5, -1, -0.5, 0, 0.5, 1),
-  wide      = c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5),
+  narrow = c(-1.5, -1, -0.5, 0, 0.5, 1),
   empirical = c(-2, -1.5, -0.5, 0.5, 1.5, 2.5)
 )
 D_vals <- c(3, 4)  # primarily D = 3, optionally 4 for robustness
@@ -54,9 +47,9 @@ for (N in N_vals) {
           # Simulate hierarchical theta
           mu_theta <- rnorm(D, 0, 1)
           sigma_theta <- runif(D, 0.7, 1.3)
-          theta_true <- matrix(rnorm(N * D), nrow = N, ncol = D)
+          theta_true <- matrix(NA, nrow = N, ncol = D)
           for (d in 1:D) {
-            theta_true[, d] <- rnorm(N, mu_theta[d], sigma_theta[d])
+            theta_true[, d] <- rnorm(N, mean = mu_theta[d], sd = sigma_theta[d])
           }
           
           alpha_true <- rlnorm(K, log(1), alpha_sd)
@@ -85,7 +78,7 @@ for (N in N_vals) {
           
           stan_data <- list(N = N, K = K, D = D, C = C, Y = Y, lambda_signs = lambda_signs)
           
-          model <- cmdstan_model(here("stan", "ordinal_irtm_recovery.stan"))
+          model <- cmdstan_model(here("stan", "ordinal_irtm.stan"))
           
           fit_vi <- model$variational(
             data = stan_data,
@@ -97,7 +90,7 @@ for (N in N_vals) {
           )
           
           draws <- fit_vi$draws(format = "df")
-          theta_draws <- draws %>% select(starts_with("theta"))
+          theta_draws <- draws %>% select(starts_with("theta")) %>% select(order(colnames(.)))
           theta_est <- theta_draws %>% summarise(across(everything(), mean))
           
           correlation <- cor(as.numeric(theta_true), as.numeric(theta_est))
@@ -105,6 +98,7 @@ for (N in N_vals) {
           
           write_csv(theta_est, file.path(out_dir, paste0("theta_est_", sim_id, ".csv")))
           write_csv(data.frame(correlation = correlation), file.path(out_dir, paste0("summary_", sim_id, ".csv")))
+          write_csv(data.frame(mu_theta = mu_theta, sigma_theta = sigma_theta), file.path(out_dir, paste0("priors_", sim_id, ".csv")))
           
           plot <- qplot(as.numeric(theta_true), as.numeric(theta_est)) +
             labs(title = paste0("Recovery: ", sim_id),
@@ -113,8 +107,12 @@ for (N in N_vals) {
           
           ggsave(file.path(out_dir, paste0("plot_", sim_id, ".png")), plot, bg = "white")
           
+          elbo_val <- fit_vi$metadata()$elbo
+          
           data_log <- bind_rows(data_log, tibble(
-            N = N, K = K, D = D, alpha_sd = alpha_sd, cutpoints = cp_name, correlation = correlation
+            sim_id = sim_id,
+            N = N, K = K, D = D, alpha_sd = alpha_sd, cutpoints = cp_name,
+            correlation = correlation, elbo = elbo_val, seed = 123
           ))
         }
       }
@@ -171,7 +169,7 @@ overall_stats <- summary_data %>%
   )
 
 print("Mean correlations per condition:")
-print(overall_stats, n = 48)
+print(overall_stats, n = 72)
 
 # --------------------------------------------------------------
 # Step 4: Visualization: heatmaps or faceted plots
@@ -186,8 +184,3 @@ ggplot(overall_stats, aes(x = alpha_sd, y = N, fill = mean_r)) +
     y = "Sample Size (N)"
   ) +
   theme_minimal()
-
-# Optional: Save summary plot
-ggsave(file.path(latest_batch, "summary_heatmap.png"), width = 10, height = 6, dpi = 300)
-
-message("\n✅ Summary analysis complete. Output saved to:", latest_batch)
