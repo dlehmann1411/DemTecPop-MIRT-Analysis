@@ -1,6 +1,6 @@
 
 // ------------------------------------------------------------
-// ORDINAL MIRT MODEL — SIMPLE PRIOR STRUCTURE FOR STABLE VI
+// ORDINAL MIRT MODEL — VECTORIZED FOR PERFORMANCE (VI-Optimized)
 // ------------------------------------------------------------
 
 data {
@@ -10,20 +10,20 @@ data {
   int<lower=2> C;                // Number of ordinal response categories
 
   array[N, K] int<lower=1, upper=C> Y;   // Response matrix (ordinal, 1 to C)
-  matrix[K, D] lambda_signs;             // Fixed loading design (-1, 0, +1)
+  matrix[K, D] lambda_signs;             // Fixed loading structure (-1, 0, +1)
 }
 
 parameters {
-  // Latent traits: theta_n for each respondent across D dimensions
+  // Latent traits: one vector per respondent
   matrix[N, D] theta;
 
-  // Discrimination (slope) parameters for each item
+  // Item discrimination (slopes)
   vector<lower=0>[K] alpha;
 
-  // Intercepts (difficulty/location) for each item
+  // Item intercepts (locations)
   vector[K] intercepts;
 
-  // Ordered cutpoints (shared across items)
+  // Ordered category thresholds (shared across items)
   ordered[C - 1] cutpoints;
 }
 
@@ -32,25 +32,31 @@ model {
   // PRIORS — flat & VI-friendly
   // ------------------------------------------------------------
 
-  // Latent abilities: standard normal priors
+  // Standard normal priors for latent traits
   to_vector(theta) ~ normal(0, 1);
 
-  // Discrimination parameters: mildly informative around α = 1
+  // Mildly informative priors for discrimination parameters (centered on 1)
   alpha ~ normal(1, 0.5);
 
-  // Item intercepts: centered at 0, weakly informative
+  // Weakly informative priors for item intercepts
   intercepts ~ normal(0, 1);
 
-  // Thresholds for ordinal response categories
+  // Shared thresholds for ordinal responses
   cutpoints ~ normal(0, 1);
 
   // ------------------------------------------------------------
-  // LIKELIHOOD
+  // LIKELIHOOD — fully vectorized eta computation
   // ------------------------------------------------------------
+
+  matrix[N, K] eta;
+  eta = theta * lambda_signs';                    // Matrix product: N × D × D × K → N × K
+  eta = eta .* rep_matrix(alpha', N);             // Scale each item (column-wise)
+  eta = eta + rep_matrix(intercepts', N);         // Add intercepts (broadcast across rows)
+
+  // Apply the ordered logistic model to each response
   for (n in 1:N) {
     for (k in 1:K) {
-      real eta = intercepts[k] + alpha[k] * dot_product(lambda_signs[k], theta[n]);
-      Y[n, k] ~ ordered_logistic(eta, cutpoints);
+      Y[n, k] ~ ordered_logistic(eta[n, k], cutpoints);
     }
   }
 }
