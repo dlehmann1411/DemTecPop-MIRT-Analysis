@@ -6,34 +6,33 @@
 # estimated via mean-field Variational Inference (VI). It simulates data with known
 # parameters and evaluates how well the model recovers latent traits (theta).
 #
-# Updated to use hierarchical priors and lognormal alpha priors (Stan model: ordinal_irtm_recovery.stan)
+# Using simplified flat MIRT model without hierarchical priors (Stan model: ordinal_irtm_flat.stan)
+
 
 library(tidyverse)
 library(cmdstanr)
 library(posterior)
 library(here)
 
-# ----------------------------------
+# -----------------------------
 # Simulation grid
-# ----------------------------------
-N_vals <- c(1000, 5000, 10000, 20000)  # realistic respondent sizes
-K_vals <- c(18)                        # fixed item count
-alpha_sds <- c(0.25, 0.5, 0.75)        # spread of item discrimination
+# -----------------------------
+N_vals <- c(10000, 20000)
+K_vals <- c(18)
+alpha_sds <- c(0.5, 0.75)
 cutpoint_sets <- list(
   narrow    = c(-1.5, -1, -0.5, 0, 0.5, 1),
-  wide      = c(-2.5, -1.5, -0.5, 0.5, 1.5, 2.5),
   empirical = c(-2, -1.5, -0.5, 0.5, 1.5, 2.5)
 )
-D_vals <- c(3, 4)  # primarily D = 3, optionally 4 for robustness
+D_vals <- c(3)
 
-# Create output directory
+# Output directory
 batch_id <- format(Sys.time(), "%Y%m%d_%H%M")
 out_dir <- here("results", paste0("batch_", batch_id))
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
 data_log <- tibble()
 
-# Loop through grid
 for (N in N_vals) {
   for (K in K_vals) {
     for (alpha_sd in alpha_sds) {
@@ -43,23 +42,26 @@ for (N in N_vals) {
           C <- 7
           cutpoints_true <- cutpoint_sets[[cp_name]]
           
-          # Simulate hierarchical theta
-          mu_theta <- rnorm(D, 0, 1)
-          sigma_theta <- runif(D, 0.7, 1.3)
-          theta_true <- matrix(NA, nrow = N, ncol = D)
-          for (d in 1:D) {
-            theta_true[, d] <- rnorm(N, mu_theta[d], sigma_theta[d])
-          }
+          # Simulate flat theta (standard normal)
+          theta_true <- matrix(rnorm(N * D), nrow = N, ncol = D)
           
+          # Simulate item parameters
           alpha_true <- rlnorm(K, log(1), alpha_sd)
           intercepts_true <- rnorm(K, 0, 1.5)
           
+          # Loading structure
           lambda_signs <- matrix(0, nrow = K, ncol = D)
           for (d in 1:D) {
             idx <- ((d - 1) * K / D + 1):(d * K / D)
             lambda_signs[idx, d] <- 1
           }
           
+          # Calculate eta matrix
+          eta_matrix <- theta_true %*% t(lambda_signs)
+          eta_matrix <- sweep(eta_matrix, 2, alpha_true, "*")
+          eta_matrix <- sweep(eta_matrix, 2, intercepts_true, "+")
+          
+          # Response generation (ordered logit)
           ordered_logistic_probs <- function(eta, cutpoints) {
             logits <- c(-Inf, cutpoints, Inf)
             cdfs <- plogis(logits - eta)
@@ -69,16 +71,18 @@ for (N in N_vals) {
           Y <- matrix(NA, nrow = N, ncol = K)
           for (n in 1:N) {
             for (k in 1:K) {
-              eta <- intercepts_true[k] + alpha_true[k] * sum(lambda_signs[k, ] * theta_true[n, ])
-              probs <- ordered_logistic_probs(eta, cutpoints_true)
+              probs <- ordered_logistic_probs(eta_matrix[n, k], cutpoints_true)
               Y[n, k] <- sample(1:C, 1, prob = probs)
             }
           }
           
+          # Stan input
           stan_data <- list(N = N, K = K, D = D, C = C, Y = Y, lambda_signs = lambda_signs)
           
-          model <- cmdstan_model(here("stan", "ordinal_irtm_recovery.stan"))
+          # Compile model (skip if already compiled)
+          model <- cmdstan_model(here("stan", "ordinal_irtm.stan"), force_recompile = FALSE)
           
+          # VI estimation
           fit_vi <- model$variational(
             data = stan_data,
             iter = 10000,
