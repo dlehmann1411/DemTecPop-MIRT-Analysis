@@ -1,13 +1,9 @@
-# batch_simulate_and_fit_vi.R
+# simulate_and_fit_rhs.R
 # ------------------------------------------------------------------------------
-# Targeted Simulation + Recovery Evaluation for Ordinal MIRT (Variational Inference)
+# Simulation + Recovery Evaluation for Exploratory Ordinal MIRT (RHS + VI)
 # ------------------------------------------------------------------------------
-# This script conducts a focused simulation study for a multidimensional IRT model
-# estimated via mean-field Variational Inference (VI). It simulates data with known
-# parameters and evaluates how well the model recovers latent traits (theta).
-#
-# Using simplified flat MIRT model without hierarchical priors (Stan model: ordinal_irtm_flat.stan)
-
+# This script simulates ordinal item responses under a sparse loading structure
+# and estimates latent traits using a Regularized Horseshoe (RHS) prior in Stan.
 
 library(tidyverse)
 library(cmdstanr)
@@ -17,20 +13,17 @@ library(here)
 # -----------------------------
 # Simulation grid
 # -----------------------------
-N_vals <- c(10000, 20000)
+N_vals <- c(20000)
 K_vals <- c(18)
 alpha_sds <- c(0.5, 0.75)
 cutpoint_sets <- list(
-  narrow    = c(-1.5, -1, -0.5, 0, 0.5, 1),
   empirical = c(-2, -1.5, -0.5, 0.5, 1.5, 2.5)
 )
-D_vals <- c(3)
+D_vals <- c(6)  # Exploratory: allow 6 dimensions, simulate signal on 3 only
 
-# Output directory
 batch_id <- format(Sys.time(), "%Y%m%d_%H%M")
-out_dir <- here("results", paste0("batch_", batch_id))
+out_dir <- here("results_rhs", paste0("batch_", batch_id))
 dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
-
 data_log <- tibble()
 
 for (N in N_vals) {
@@ -42,26 +35,42 @@ for (N in N_vals) {
           C <- 7
           cutpoints_true <- cutpoint_sets[[cp_name]]
           
-          # Simulate flat theta (standard normal)
-          theta_true <- matrix(rnorm(N * D), nrow = N, ncol = D)
+          # Simulate theta from 3 overlapping ideological groups
+          group_size <- N %/% 3
+          remainder <- N %% 3
+          
+          centers <- list(
+            democrat   = c( 1.5,  0.5, -1.0),
+            technocrat = c( 0.5,  1.5, -0.5),
+            populist   = c(-1.0, -0.5,  1.5)
+          )
+          
+          spread <- 1.0
+          theta_dem <- matrix(rnorm(group_size * 3, mean = rep(centers$democrat, each = group_size), sd = spread), ncol = 3, byrow = TRUE)
+          theta_tec <- matrix(rnorm(group_size * 3, mean = rep(centers$technocrat, each = group_size), sd = spread), ncol = 3, byrow = TRUE)
+          theta_pop <- matrix(rnorm((group_size + remainder) * 3, mean = rep(centers$populist, each = group_size + remainder), sd = spread), ncol = 3, byrow = TRUE)
+          
+          theta_true_3d <- rbind(theta_dem, theta_tec, theta_pop)
+          theta_true <- cbind(theta_true_3d, matrix(0, nrow = N, ncol = D - 3))  # pad remaining dims with 0
+          
+          group_id <- c(rep("Democrat", group_size), rep("Technocrat", group_size), rep("Populist", group_size + remainder))
           
           # Simulate item parameters
           alpha_true <- rlnorm(K, log(1), alpha_sd)
           intercepts_true <- rnorm(K, 0, 1.5)
           
-          # Loading structure
-          lambda_signs <- matrix(0, nrow = K, ncol = D)
-          for (d in 1:D) {
-            idx <- ((d - 1) * K / D + 1):(d * K / D)
-            lambda_signs[idx, d] <- 1
-          }
+          # Simulate sparse loading matrix lambda_true (only load on 3 dims)
+          lambda_true <- matrix(0, nrow = K, ncol = D)
+          lambda_true[1:6, 1] <- runif(6, 0.7, 1.2)
+          lambda_true[7:12, 2] <- runif(6, 0.7, 1.2)
+          lambda_true[13:18, 3] <- runif(6, 0.7, 1.2)
           
-          # Calculate eta matrix
-          eta_matrix <- theta_true %*% t(lambda_signs)
+          # Generate linear predictor
+          eta_matrix <- theta_true %*% t(lambda_true)
           eta_matrix <- sweep(eta_matrix, 2, alpha_true, "*")
           eta_matrix <- sweep(eta_matrix, 2, intercepts_true, "+")
           
-          # Response generation (ordered logit)
+          # Simulate ordinal responses
           ordered_logistic_probs <- function(eta, cutpoints) {
             logits <- c(-Inf, cutpoints, Inf)
             cdfs <- plogis(logits - eta)
@@ -76,13 +85,10 @@ for (N in N_vals) {
             }
           }
           
-          # Stan input
-          stan_data <- list(N = N, K = K, D = D, C = C, Y = Y, lambda_signs = lambda_signs)
+          stan_data <- list(N = N, K = K, D = D, C = C, Y = Y)
           
-          # Compile model (skip if already compiled)
-          model <- cmdstan_model(here("stan", "ordinal_irtm.stan"), force_recompile = FALSE)
+          model <- cmdstan_model(here("stan", "ordinal_irtm_rhs.stan"), force_recompile = TRUE)
           
-          # VI estimation
           fit_vi <- model$variational(
             data = stan_data,
             iter = 10000,
@@ -102,9 +108,19 @@ for (N in N_vals) {
           write_csv(theta_est, file.path(out_dir, paste0("theta_est_", sim_id, ".csv")))
           write_csv(data.frame(correlation = correlation), file.path(out_dir, paste0("summary_", sim_id, ".csv")))
           
-          plot <- qplot(as.numeric(theta_true), as.numeric(theta_est)) +
-            labs(title = paste0("Recovery: ", sim_id),
-                 x = "True Theta", y = "Estimated Theta (mean VI)") +
+          plot_data <- tibble(
+            true_theta = as.numeric(theta_true),
+            est_theta  = as.numeric(theta_est),
+            group      = rep(group_id, times = D)
+          )
+          
+          plot <- ggplot(plot_data, aes(x = true_theta, y = est_theta, color = group)) +
+            geom_point(alpha = 0.3, size = 0.5) +
+            scale_color_manual(values = c("Democrat" = "#0072B2", 
+                                          "Technocrat" = "#009E73", 
+                                          "Populist" = "#D55E00")) +
+            labs(title = paste0("Recovery by Subtype: ", sim_id),
+                 x = "True Theta", y = "Estimated Theta (mean VI)", color = "Group") +
             theme_minimal()
           
           ggsave(file.path(out_dir, paste0("plot_", sim_id, ".png")), plot, bg = "white")
@@ -119,8 +135,7 @@ for (N in N_vals) {
 }
 
 write_csv(data_log, file.path(out_dir, "batch_summary.csv"))
-message("\n✅ All simulations completed. Summary saved to:", out_dir)
-
+message("\n✅ All RHS simulations completed. Summary saved to:", out_dir)
 
 
 ################################################################################
