@@ -1,88 +1,66 @@
 
 // ------------------------------------------------------------
-// ORDINAL MIRT MODEL — EXPLORATORY STRUCTURE WITH RHS PRIOR
-// ------------------------------------------------------------
-
-// This model estimates a multidimensional IRT model for ordinal responses,
-// using a regularized horseshoe prior on item loadings to induce sparsity
-// and enable data-driven dimensionality discovery.
-// Suitable for exploratory MIRT with unknown or partially known structure.
-//
-// Key idea: Rather than fixing which item loads on which factor, we estimate
-// all loadings and use shrinkage to identify the relevant dimensions.
-
+// ORDINAL MIRT — EXPLORATORY STRUCTURE WITH REGULARIZED HORSESHOE
+// Element-wise RHS on factor loadings (lambda), item-specific thresholds,
+// no intercepts and no alpha to avoid scale confounding with lambda.
 // ------------------------------------------------------------
 
 data {
-  int<lower=1> N;                // Number of respondents
-  int<lower=1> K;                // Number of items
-  int<lower=1> D;                // Number of latent dimensions (exploratory space)
-  int<lower=2> C;                // Number of ordinal response categories (e.g., Likert scale with 7 levels)
-
-  array[N, K] int<lower=1, upper=C> Y;   // Response matrix (ordinal responses coded from 1 to C)
+  int<lower=1> N;                    // Number of respondents
+  int<lower=1> K;                    // Number of items
+  int<lower=1> D;                    // Number of latent dimensions (exploratory space, e.g., 15)
+  int<lower=2> C;                    // Number of ordered response categories
+  array[N, K] int<lower=1, upper=C> Y; // Response matrix (1..C)
 }
 
 parameters {
-  matrix[N, D] theta;                   // Latent traits: respondent positions on D latent dimensions
-  vector<lower=0>[K] alpha;             // Discrimination parameters: item slopes (positive-only)
-  vector[K] intercepts;                // Item intercepts: baseline difficulty/location parameters
-  ordered[C - 1] cutpoints;            // Shared category thresholds for ordered logistic responses
+  // Latent traits
+  matrix[N, D] theta;                // Person parameters (standard normal prior)
 
-  // Exploratory item loading structure with shrinkage priors
-  matrix[K, D] lambda_raw;             // Free loadings: each item may load on each dimension
-  real<lower=0> tau;                   // Global shrinkage parameter: how aggressively we shrink all loadings
-  vector<lower=0>[K] lambda_local;     // Local shrinkage: item-specific relevance weights
+  // Regularized horseshoe for item-by-dimension loadings (element-wise)
+  matrix[K, D] z_lambda;             // Non-centered base normals
+  vector<lower=0>[D] tau;            // Global (dimension-wise) shrinkage scales
+  matrix<lower=0>[K, D] lambda_local;// Local (element-wise) shrinkage scales
+  real<lower=0> c2;                  // Slab variance parameter (controls tail heaviness)
+
+  // Item-specific ordered thresholds
+  array[K] ordered[C - 1] cutpoints; // Thresholds per item (graded response)
+}
+
+transformed parameters {
+  matrix[K, D] lambda;               // Actual loadings after shrinkage
+  for (k in 1:K) {
+    for (d in 1:D) {
+      // Regularized horseshoe shrinkage factor (Piironen & Vehtari)
+      real lambda_tilde = tau[d] * lambda_local[k, d];
+      real shrink = sqrt( c2 * square(lambda_tilde) / (c2 + square(lambda_tilde)) );
+      lambda[k, d] = z_lambda[k, d] * shrink;
+    }
+  }
 }
 
 model {
-  // ------------------------------------------------------------
-  // PRIORS — Weakly informative priors for stability under VI
-  // ------------------------------------------------------------
+  // -----------------------
+  // Priors
+  // -----------------------
+  to_vector(theta) ~ normal(0, 1);            // Identifies scale of theta
+  to_vector(z_lambda) ~ normal(0, 1);         // Non-centered base
+  tau ~ cauchy(0, 1);                         // Global (half-Cauchy due to <lower=0>)
+  to_vector(lambda_local) ~ cauchy(0, 1);     // Local (half-Cauchy)
+  c2 ~ inv_gamma(2, 8);                       // Moderately wide slab
 
-  // Latent traits (theta): standard normal prior across respondents
-  to_vector(theta) ~ normal(0, 1);
+  // Mild priors on item thresholds for stability (optional but recommended)
+  for (k in 1:K) cutpoints[k] ~ normal(0, 2);
 
-  // Discrimination (alpha): weakly informative prior centered at 1
-  alpha ~ normal(1, 0.5);
-
-  // Intercepts and cutpoints: weakly centered around 0
-  intercepts ~ normal(0, 1);
-  cutpoints ~ normal(0, 1);
-
-  // ------------------------------------------------------------
-  // REGULARIZED HORSESHOE PRIORS ON LOADINGS (lambda_raw)
-  // ------------------------------------------------------------
-
-  // Global and local shrinkage hyperpriors
-  tau ~ cauchy(0, 1);                   // Encourages global sparsity
-  lambda_local ~ cauchy(0, 1);          // Allows exceptions for each item
-
-  // Hierarchical shrinkage on each item-dimension loading
-  for (k in 1:K) {
-    for (d in 1:D) {
-      lambda_raw[k, d] ~ normal(0, tau * lambda_local[k]);
-    }
-  }
-
-  // ------------------------------------------------------------
-  // LIKELIHOOD — Ordered logistic formulation
-  // ------------------------------------------------------------
-
-  matrix[N, K] eta;
-  
-  // 1. Compute latent predictor: respondent traits × item loadings
-  eta = theta * lambda_raw';            // Matrix multiplication: N x D * D x K → N x K
-
-  // 2. Apply item discrimination weights
-  eta = eta .* rep_matrix(alpha', N);   // Elementwise multiplication: scale each column/item by alpha[k]
-
-  // 3. Add item-specific intercepts
-  eta = eta + rep_matrix(intercepts', N);
-
-  // 4. Likelihood: ordinal response model per item per respondent
-  for (n in 1:N) {
+  // -----------------------
+  // Likelihood
+  // -----------------------
+  {
+    matrix[N, K] eta = theta * lambda';       // Person-by-item linear predictor
     for (k in 1:K) {
-      Y[n, k] ~ ordered_logistic(eta[n, k], cutpoints);
+      for (n in 1:N) {
+        Y[n, k] ~ ordered_logistic(eta[n, k], cutpoints[k]);
+      }
     }
   }
 }
