@@ -45,7 +45,7 @@ transformed parameters {
   array[K] vector[C - 1] cutpoints;
   for (k in 1:K) {
     cutpoints[k][1] = cut_base[k];
-    for (int c = 2; c <= C - 1; ++c) {
+    for (c in 2:(C - 1)) {                // <-- Stan loop syntax
       // strictly increasing by construction (gap > 0)
       cutpoints[k][c] = cutpoints[k][c - 1] + gap[k, c - 1];
     }
