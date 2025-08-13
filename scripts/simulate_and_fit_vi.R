@@ -1,4 +1,3 @@
-
 # ---------------------------------------------------------------
 # Exploratory ORDINAL MIRT with element-wise Regularized Horseshoe
 # - c2 is treated as DATA (grid-swept here)
@@ -18,7 +17,7 @@ library(stringr)
 # ----------------------- Config --------------------------------
 N_vals      <- c(10000, 20000)
 c2_vals     <- c(2, 5, 10)             # slab variance grid
-reps        <- 1:3
+reps        <- 1:2
 D_fit       <- 15
 K           <- 18
 C           <- 7
@@ -27,7 +26,7 @@ EPS        <- 0.075                    # PIP threshold |lambda| > EPS
 
 # Control which engines to run
 DO_VI       <- TRUE                    # run VI screening
-DO_NUTS     <- TRUE                    # run NUTS confirmation
+DO_NUTS     <- FALSE                    # run NUTS confirmation
 RUN_NUTS_ON_REP <- 1                   # run NUTS only for rep == this value (adjust if needed)
 
 # Output root
@@ -66,22 +65,50 @@ collect_lambda_matrix <- function(draws_df, K, D, fun = mean) {
 align_dimensions <- function(L_est, L_true) {
   D_hat <- ncol(L_est); D_true <- ncol(L_true)
   S <- matrix(0, nrow = D_hat, ncol = D_true)
+  
+  # Similarity: |correlation| across items; fallback to cosine if variance ~ 0
   for (dh in 1:D_hat) {
+    v1 <- L_est[, dh]
     for (dt in 1:D_true) {
-      S[dh, dt] <- suppressWarnings(cor(L_est[, dh], L_true[, dt]))
+      v2 <- L_true[, dt]
+      if (sd(v1) < 1e-12 || sd(v2) < 1e-12) {
+        # Cosine similarity as a robust fallback when a column is (near) constant
+        denom <- sqrt(sum(v1^2)) * sqrt(sum(v2^2)) + 1e-12
+        sim <- sum(v1 * v2) / denom
+        S[dh, dt] <- abs(sim)
+      } else {
+        r <- suppressWarnings(cor(v1, v2))
+        S[dh, dt] <- if (is.finite(r)) abs(r) else 0
+      }
     }
   }
-  S[is.na(S)] <- 0
-  # maximize absolute correlation -> minimize negative abs(cor)
-  cost <- -abs(S)
-  perm <- solve_LSAP(cost)   # mapping est dh -> true dt
-  list(L_est_aligned = L_est[, perm, drop = FALSE],
-       perm = as.integer(perm),
-       score = S)
+  
+  # Make S square if needed (Hungarian algorithm expects a square cost matrix)
+  if (D_hat != D_true) {
+    m <- max(D_hat, D_true)
+    S_pad <- matrix(0, nrow = m, ncol = m)
+    S_pad[1:D_hat, 1:D_true] <- S
+    S <- S_pad
+  }
+  
+  # S is similarity in [0,1]
+  if (max(S) <= 0 || !is.finite(max(S))) {
+    perm_full <- seq_len(nrow(S))
+  } else {
+    perm_full <- clue::solve_LSAP(S, maximum = TRUE)  # maximize similarity
+  }
+  
+  
+  # Project back to original dimension counts (in case of padding)
+  perm <- as.integer(perm_full[seq_len(D_hat)])
+  L_est_aligned <- L_est[, perm, drop = FALSE]
+  list(L_est_aligned = L_est_aligned, perm = perm, score = S)
 }
 
+
+
 # ----------------------- Compile Stan once ---------------------
-stan_file <- here("stan", "ordinal_mirt_rhs_regularized_c2data.stan")
+stan_file <- here("stan", "ordinal_irtm.stan")
 mod <- cmdstan_model(stan_file, force_recompile = FALSE)
 
 # ----------------------- Main loop -----------------------------
@@ -181,13 +208,25 @@ for (N in N_vals) {
         stop("No inference engine ran. Set DO_VI or DO_NUTS to TRUE.")
       }
       
-      # 7) Alignment and classification metrics (using reference estimates)
-      align <- align_dimensions(Lambda_ref, lambda_true)
-      Lambda_al <- align$L_est_aligned
+      # 7) Alignment and classification metrics (use the SAME perm for means & PIPs)
+      align     <- align_dimensions(Lambda_ref, lambda_true)
       perm      <- align$perm
+      Lambda_al <- align$L_est_aligned    
       
+      # Apply the same column permutation to PIPs
+      PIP_al <- PIP_ref[, perm, drop = FALSE]
+      
+      # (Optional) clean column labels for plotting
+      colnames(Lambda_al) <- paste0("dim_", seq_len(ncol(Lambda_al)))
+      colnames(PIP_al)    <- colnames(Lambda_al)
+      
+      # Save aligned matrices
+      write.csv(Lambda_al, file.path(out_dir, paste0("Lambda_hat_", ref_tag, "_aligned.csv")), row.names = FALSE)
+      write.csv(PIP_al,    file.path(out_dir, paste0("Lambda_PIP_", ref_tag, "_aligned.csv")), row.names = FALSE)
+      
+      # Item-wise argmax AFTER alignment
       true_dim <- apply(abs(lambda_true), 1, which.max)
-      pred_dim <- apply(abs(Lambda_al), 1, which.max)
+      pred_dim <- apply(abs(Lambda_al),   1, which.max)
       
       classification <- tibble(
         item = 1:K,
@@ -196,15 +235,15 @@ for (N in N_vals) {
       )
       
       conf_mat <- table(True = true_dim, Pred = pred_dim)
-      write.csv(conf_mat, file.path(out_dir, paste0("confusion_matrix_", ref_tag, ".csv")))
+      write.csv(conf_mat, file.path(out_dir, paste0("confusion_matrix_", ref_tag, "_aligned.csv")))
       
       acc <- mean(true_dim == pred_dim)
-      writeLines(sprintf("Accuracy (%s): %.3f", ref_tag, acc),
-                 file.path(out_dir, paste0("accuracy_", ref_tag, ".txt")))
+      writeLines(sprintf("Accuracy (%s, aligned): %.3f", ref_tag, acc),
+                 file.path(out_dir, paste0("accuracy_", ref_tag, "_aligned.txt")))
       
-      # 8) Factor relevance via column L2 (reference)
-      col_l2 <- sqrt(colSums(Lambda_ref^2))
-      write.csv(col_l2, file.path(out_dir, paste0("lambda_col_L2_", ref_tag, ".csv")), row.names = FALSE)
+      # 8) Factor relevance via column L2 (use ALIGNED matrix)
+      col_l2 <- sqrt(colSums(Lambda_al^2))
+      write.csv(col_l2, file.path(out_dir, paste0("lambda_col_L2_", ref_tag, "_aligned.csv")), row.names = FALSE)
       
       # 9) Heatmaps
       # True
@@ -225,17 +264,17 @@ for (N in N_vals) {
         scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
         labs(title = paste0("Estimated Lambda (aligned, ", ref_tag, ") - ", sim_id)) +
         theme_minimal()
-      ggsave(file.path(out_dir, paste0("lambda_est_", ref_tag, ".png")), p2, bg = "white", width = 7, height = 7, dpi = 150)
+      ggsave(file.path(out_dir, paste0("lambda_est_", ref_tag, "_aligned.png")), p2, bg = "white", width = 7, height = 7, dpi = 150)
       
-      # PIP heatmap (reference)
-      heat_pip <- melt(PIP_ref)
+      # PIP heatmap (aligned)
+      heat_pip <- melt(PIP_al)
       colnames(heat_pip) <- c("Item", "Dimension", "PIP")
       p3 <- ggplot(heat_pip, aes(x = factor(Dimension), y = factor(Item), fill = PIP)) +
         geom_tile() +
         scale_fill_gradient(limits = c(0, 1)) +
-        labs(title = paste0("PIP(|lambda|>", EPS, ") (", ref_tag, ") - ", sim_id)) +
+        labs(title = paste0("PIP(|lambda|>", EPS, ") (aligned, ", ref_tag, ") - ", sim_id)) +
         theme_minimal()
-      ggsave(file.path(out_dir, paste0("lambda_pip_", ref_tag, ".png")), p3, bg = "white", width = 7, height = 7, dpi = 150)
+      ggsave(file.path(out_dir, paste0("lambda_pip_", ref_tag, "_aligned.png")), p3, bg = "white", width = 7, height = 7, dpi = 150)
       
       # 10) Agreement VI vs NUTS if both ran
       if (DO_VI && have_nuts) {
